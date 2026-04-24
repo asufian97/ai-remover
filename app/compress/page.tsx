@@ -44,6 +44,10 @@ type CompressItem = {
 export default function CompressPage() {
   const fileInputRef = useRef<HTMLInputElement>(null);
   const itemsRef = useRef<CompressItem[]>([]);
+  const stageRef = useRef<HTMLDivElement>(null);
+  const compressedCanvasRef = useRef<HTMLCanvasElement>(null);
+  const originalCanvasRef = useRef<HTMLCanvasElement>(null);
+  const sliderDragRef = useRef(false);
 
   const [items, setItems] = useState<CompressItem[]>([]);
   const [isDragOver, setIsDragOver] = useState(false);
@@ -53,9 +57,78 @@ export default function CompressPage() {
   const [exportQuality, setExportQuality] = useState(80);
   const [maxDimension, setMaxDimension] = useState<number>(0);
 
+  const [compareId, setCompareId] = useState<string | null>(null);
+  const [sliderPct, setSliderPct] = useState(50);
+
+  const compareItem = compareId
+    ? items.find((i) => i.id === compareId) ?? null
+    : null;
+
   useEffect(() => {
     itemsRef.current = items;
   }, [items]);
+
+  useEffect(() => {
+    if (!compareId) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') setCompareId(null);
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [compareId]);
+
+  useEffect(() => {
+    if (!compareItem || !compareItem.compressedBlob) return;
+    const ocanvas = originalCanvasRef.current;
+    const ccanvas = compressedCanvasRef.current;
+    if (!ocanvas || !ccanvas) return;
+
+    ocanvas.width = compareItem.imageData.width;
+    ocanvas.height = compareItem.imageData.height;
+    ocanvas.getContext('2d')?.putImageData(compareItem.imageData, 0, 0);
+
+    const url = URL.createObjectURL(compareItem.compressedBlob);
+    const img = new Image();
+    img.onload = () => {
+      ccanvas.width = img.naturalWidth;
+      ccanvas.height = img.naturalHeight;
+      ccanvas.getContext('2d')?.drawImage(img, 0, 0);
+      URL.revokeObjectURL(url);
+    };
+    img.onerror = () => URL.revokeObjectURL(url);
+    img.src = url;
+  }, [compareItem]);
+
+  const updateSlider = (clientX: number) => {
+    const s = stageRef.current;
+    if (!s) return;
+    const rect = s.getBoundingClientRect();
+    if (rect.width <= 0) return;
+    const pct = ((clientX - rect.left) / rect.width) * 100;
+    setSliderPct(Math.max(0, Math.min(100, pct)));
+  };
+
+  const onSliderDown = (e: React.PointerEvent<HTMLDivElement>) => {
+    sliderDragRef.current = true;
+    (e.currentTarget as HTMLDivElement).setPointerCapture(e.pointerId);
+    updateSlider(e.clientX);
+  };
+
+  const onSliderMove = (e: React.PointerEvent<HTMLDivElement>) => {
+    if (!sliderDragRef.current) return;
+    updateSlider(e.clientX);
+  };
+
+  const onSliderUp = (e: React.PointerEvent<HTMLDivElement>) => {
+    if (!sliderDragRef.current) return;
+    sliderDragRef.current = false;
+    (e.currentTarget as HTMLDivElement).releasePointerCapture(e.pointerId);
+  };
+
+  const openCompare = (id: string) => {
+    setSliderPct(50);
+    setCompareId(id);
+  };
 
   const updateItem = useCallback((id: string, patch: Partial<CompressItem>) => {
     setItems((prev) => prev.map((it) => (it.id === id ? { ...it, ...patch } : it)));
@@ -410,6 +483,15 @@ export default function CompressPage() {
                       </div>
                       <Button
                         size="sm"
+                        variant="outline"
+                        onClick={() => openCompare(item.id)}
+                        disabled={!item.compressedBlob || item.computing}
+                      >
+                        <GitCompareArrows className="mr-1.5 h-4 w-4" />
+                        Compare
+                      </Button>
+                      <Button
+                        size="sm"
                         variant="secondary"
                         onClick={() => downloadItem(item)}
                         disabled={!item.compressedBlob || item.computing}
@@ -437,6 +519,78 @@ export default function CompressPage() {
           All compression happens locally. Your images never leave your browser.
         </p>
       </div>
+
+      {compareItem && compareItem.compressedBlob && (
+        <div
+          role="dialog"
+          aria-modal="true"
+          className="fixed inset-0 z-50 flex flex-col items-center justify-center gap-3 bg-black/85 p-4 sm:p-8"
+          onClick={(e) => {
+            if (e.target === e.currentTarget) setCompareId(null);
+          }}
+        >
+          <div className="flex w-full max-w-5xl items-center justify-between gap-4 text-white">
+            <div className="min-w-0 flex-1 truncate text-sm">
+              <span className="font-medium">{compareItem.name}</span>
+              <span className="ml-3 text-white/70 tabular-nums">
+                {formatBytes(compareItem.originalSize)} →{' '}
+                {formatBytes(compareItem.compressedSize ?? 0)}
+              </span>
+            </div>
+            <button
+              type="button"
+              onClick={() => setCompareId(null)}
+              className="rounded-full bg-white/10 p-2 text-white hover:bg-white/20"
+              aria-label="Close compare view"
+            >
+              <X className="h-5 w-5" />
+            </button>
+          </div>
+          <div
+            ref={stageRef}
+            className="relative inline-block max-h-[80vh] max-w-full select-none overflow-hidden rounded bg-black"
+            style={{ cursor: 'ew-resize', touchAction: 'none' }}
+            onPointerDown={onSliderDown}
+            onPointerMove={onSliderMove}
+            onPointerUp={onSliderUp}
+            onPointerCancel={onSliderUp}
+          >
+            <canvas
+              ref={compressedCanvasRef}
+              className="block h-auto max-h-[80vh] w-auto max-w-full"
+            />
+            <canvas
+              ref={originalCanvasRef}
+              className="pointer-events-none absolute inset-0 h-full w-full"
+              style={{ clipPath: `inset(0 ${100 - sliderPct}% 0 0)` }}
+            />
+            <div
+              className="pointer-events-none absolute inset-y-0 w-0.5 bg-white shadow-[0_0_0_1px_rgba(0,0,0,0.4)]"
+              style={{ left: `${sliderPct}%` }}
+            />
+            <div
+              className="pointer-events-none absolute flex h-10 w-10 items-center justify-center rounded-full bg-white shadow-lg ring-1 ring-black/20"
+              style={{
+                left: `${sliderPct}%`,
+                top: '50%',
+                transform: 'translate(-50%, -50%)',
+              }}
+            >
+              <div className="flex gap-1">
+                <span className="block h-3 w-0.5 bg-slate-400" />
+                <span className="block h-3 w-0.5 bg-slate-400" />
+              </div>
+            </div>
+            <span className="pointer-events-none absolute left-2 top-2 rounded bg-black/70 px-2 py-0.5 text-xs font-medium text-white">
+              Original · {compareItem.originalWidth}×{compareItem.originalHeight}
+            </span>
+            <span className="pointer-events-none absolute right-2 top-2 rounded bg-black/70 px-2 py-0.5 text-xs font-medium text-white">
+              Compressed
+            </span>
+          </div>
+          <p className="text-xs text-white/60">Drag the divider · click outside or press Esc to close</p>
+        </div>
+      )}
     </div>
   );
 }

@@ -2,7 +2,18 @@
   "permissions": {
     "allow": [
       "Bash(npm run *)",
-      "Bash(curl -s http://localhost:3001)"
+      "Bash(curl -s http://localhost:3001)",
+      "Bash(grep -aoE \"Syntax Error|Module parse failed|Module not found|Unexpected token|Can't resolve [^\\\\\\\\n]{0,100}\" /c/Users/FC/.claude/projects/c--Users-FC-Desktop-ai-projects-ai-remover/b17a649f-5730-4deb-bc49-d9a2b268a32f/tool-results/b6xj1qtz1.txt)",
+      "Bash(grep -aEo \"\\\\\\\\./node_modules/@imgly/[^\\\\\\\\s]{1,80}|ort\\\\\\\\.bundle[^\\\\\\\\s]{0,40}\" /c/Users/FC/.claude/projects/c--Users-FC-Desktop-ai-projects-ai-remover/b17a649f-5730-4deb-bc49-d9a2b268a32f/tool-results/b6xj1qtz1.txt)",
+      "Bash(grep -aEo \"node_modules/[^:\\\\\\\\n\\\\\\\\s]{1,120}\" /c/Users/FC/.claude/projects/c--Users-FC-Desktop-ai-projects-ai-remover/b17a649f-5730-4deb-bc49-d9a2b268a32f/tool-results/b6xj1qtz1.txt)",
+      "Bash(echo \"EXIT=$?\")",
+      "Read(//tmp/**)",
+      "Bash(grep -aB1 -A5 \"Syntax Error\\\\|Module parse failed\\\\|Module not found\\\\|Unexpected token\\\\|./app\" /tmp/build.log)",
+      "Bash(node -e \"console.log\\(require\\('./node_modules/@imgly/background-removal/package.json'\\).version\\)\")",
+      "Bash(node -e \"const p=JSON.parse\\(require\\('fs'\\).readFileSync\\(0,'utf8'\\)\\);console.log\\('main:',p.main\\);console.log\\('browser:',p.browser\\);console.log\\('exports:',JSON.stringify\\(p.exports,null,2\\)\\);console.log\\('deps:',JSON.stringify\\(p.dependencies\\)\\);\")",
+      "Bash(grep -oE \"import\\\\\\([^\\)]{0,200}onnxruntime[^\\)]{0,100}\\\\\\)\" node_modules/@imgly/background-removal/dist/index.mjs)",
+      "Bash(npm ls *)",
+      "Bash(node -e \"const p=require\\('./node_modules/@imgly/background-removal/package.json'\\);console.log\\('peers:',p.peerDependencies\\);console.log\\('optional:',p.optionalDependencies\\);\")"
     ]
   }
 }
