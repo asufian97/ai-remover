@@ -20,6 +20,14 @@ import {
 } from 'lucide-react';
 import { toast } from 'sonner';
 import { runInpaint } from '@/lib/inpaint-client';
+import {
+  fileToImageData,
+  imageDataToBlob,
+  makeExportName,
+  makeThumbnail,
+  triggerDownload,
+  type ExportFormat,
+} from '@/lib/image-utils';
 
 type Rect = { x: number; y: number; w: number; h: number };
 
@@ -35,8 +43,6 @@ type Item = {
   thumbnailUrl: string;
   error?: string;
 };
-
-type ExportFormat = 'png' | 'jpeg' | 'webp';
 
 export default function Home() {
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -415,7 +421,7 @@ export default function Home() {
     active.selection.h >= 2;
 
   return (
-    <main className="min-h-screen bg-gradient-to-br from-slate-50 to-slate-100 dark:from-slate-950 dark:to-slate-900">
+    <div className="w-full">
       <div className="mx-auto max-w-7xl px-4 py-10 sm:py-14">
         <header className="mb-8 text-center">
           <div className="mb-3 inline-flex items-center gap-2 rounded-full border border-slate-200 bg-white px-4 py-1.5 text-xs font-medium text-slate-600 shadow-sm dark:border-slate-800 dark:bg-slate-900 dark:text-slate-400">
@@ -797,103 +803,6 @@ export default function Home() {
           Tip: smaller, tighter boxes produce cleaner fills. Only remove watermarks from images you own.
         </p>
       </div>
-    </main>
+    </div>
   );
-}
-
-function fileToImageData(file: File): Promise<ImageData> {
-  return new Promise((resolve, reject) => {
-    const reader = new FileReader();
-    reader.onerror = () => reject(new Error('read failed'));
-    reader.onload = () => {
-      const src = reader.result as string;
-      const img = new Image();
-      img.onload = () => {
-        const canvas = document.createElement('canvas');
-        canvas.width = img.naturalWidth;
-        canvas.height = img.naturalHeight;
-        const ctx = canvas.getContext('2d');
-        if (!ctx) {
-          reject(new Error('canvas context failed'));
-          return;
-        }
-        ctx.drawImage(img, 0, 0);
-        resolve(ctx.getImageData(0, 0, canvas.width, canvas.height));
-      };
-      img.onerror = () => reject(new Error('decode failed'));
-      img.src = src;
-    };
-    reader.readAsDataURL(file);
-  });
-}
-
-function makeThumbnail(data: ImageData, maxSize: number): string {
-  const scale = Math.min(maxSize / data.width, maxSize / data.height, 1);
-  const w = Math.max(1, Math.round(data.width * scale));
-  const h = Math.max(1, Math.round(data.height * scale));
-  const src = document.createElement('canvas');
-  src.width = data.width;
-  src.height = data.height;
-  const srcCtx = src.getContext('2d');
-  if (!srcCtx) return '';
-  srcCtx.putImageData(data, 0, 0);
-  const out = document.createElement('canvas');
-  out.width = w;
-  out.height = h;
-  const outCtx = out.getContext('2d');
-  if (!outCtx) return '';
-  outCtx.drawImage(src, 0, 0, w, h);
-  return out.toDataURL('image/jpeg', 0.7);
-}
-
-async function imageDataToBlob(
-  data: ImageData,
-  format: ExportFormat,
-  quality: number,
-  maxDim: number | null,
-): Promise<Blob | null> {
-  let w = data.width;
-  let h = data.height;
-  if (maxDim && Math.max(w, h) > maxDim) {
-    const scale = maxDim / Math.max(w, h);
-    w = Math.max(1, Math.round(w * scale));
-    h = Math.max(1, Math.round(h * scale));
-  }
-  const canvas = document.createElement('canvas');
-  canvas.width = w;
-  canvas.height = h;
-  const ctx = canvas.getContext('2d');
-  if (!ctx) return null;
-  if (w !== data.width || h !== data.height) {
-    const src = document.createElement('canvas');
-    src.width = data.width;
-    src.height = data.height;
-    const sctx = src.getContext('2d');
-    if (!sctx) return null;
-    sctx.putImageData(data, 0, 0);
-    ctx.drawImage(src, 0, 0, w, h);
-  } else {
-    ctx.putImageData(data, 0, 0);
-  }
-  const mime = format === 'jpeg' ? 'image/jpeg' : format === 'webp' ? 'image/webp' : 'image/png';
-  const q = format === 'png' ? undefined : quality / 100;
-  return new Promise((resolve) => {
-    canvas.toBlob((blob) => resolve(blob), mime, q);
-  });
-}
-
-function triggerDownload(blob: Blob, name: string) {
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement('a');
-  a.href = url;
-  a.download = name;
-  a.click();
-  URL.revokeObjectURL(url);
-}
-
-function makeExportName(originalName: string, format: ExportFormat): string {
-  const dot = originalName.lastIndexOf('.');
-  const base = dot > 0 ? originalName.slice(0, dot) : originalName;
-  const ext = format === 'jpeg' ? 'jpg' : format;
-  return `${base}-cleaned.${ext}`;
 }

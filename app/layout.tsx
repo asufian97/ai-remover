@@ -2,13 +2,15 @@ import './globals.css';
 import type { Metadata } from 'next';
 import { Inter } from 'next/font/google';
 import { Toaster } from '@/components/ui/sonner';
+import { SiteHeader } from '@/components/site-header';
+import { SiteFooter } from '@/components/site-footer';
 
 const inter = Inter({ subsets: ['latin'] });
 
 export const metadata: Metadata = {
-  title: 'AI Remover — Strip Gemini watermarks',
+  title: 'AI Remover — watermark removal & image compression',
   description:
-    'Upload an AI-generated image, draw a box over the Gemini logo, remove it. Runs entirely in your browser.',
+    'Strip Gemini-style watermarks and compress images without uploading them anywhere. Runs entirely in your browser.',
 };
 
 export default function RootLayout({
@@ -19,7 +21,11 @@ export default function RootLayout({
   return (
     <html lang="en">
       <body className={inter.className}>
-        {children}
+        <div className="flex min-h-screen flex-col bg-gradient-to-br from-slate-50 to-slate-100 dark:from-slate-950 dark:to-slate-900">
+          <SiteHeader />
+          <main className="flex-1">{children}</main>
+          <SiteFooter />
+        </div>
         <Toaster />
       </body>
     </html>
