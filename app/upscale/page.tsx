@@ -32,11 +32,11 @@ type Mode = 'photo' | 'compressed';
 
 const MODELS: Record<string, string> = {
   '2-photo': 'Xenova/swin2SR-classical-sr-x2-64',
-  '4-photo': 'Xenova/swin2SR-realworld-sr-x4-64-bsrgan-psnr',
+  '4-photo': 'Xenova/swin2SR-classical-sr-x4-64',
   '4-compressed': 'Xenova/swin2SR-compressed-sr-x4-48',
 };
 
-const MAX_INPUT_DIM = 1024;
+const MAX_INPUT_DIM_BY_SCALE: Record<number, number> = { 2: 768, 4: 384 };
 const TRANSFORMERS_CDN = 'https://esm.sh/@xenova/transformers@2.17.2';
 
 type UpscaleItem = {
@@ -234,11 +234,12 @@ export default function UpscalePage() {
       return;
     }
 
+    const cap = MAX_INPUT_DIM_BY_SCALE[scale] ?? 512;
     const newItems: UpscaleItem[] = [];
     for (const file of imageFiles) {
       try {
         const original = await fileToImageData(file);
-        const { input, w, h } = downscaleIfNeeded(original, MAX_INPUT_DIM);
+        const { input, w, h } = downscaleIfNeeded(original, cap);
         newItems.push({
           id: crypto.randomUUID(),
           name: file.name,
@@ -270,9 +271,9 @@ export default function UpscalePage() {
     setItems((prev) => [...prev, ...newItems]);
     toast.success(
       `Added ${newItems.length} image${newItems.length > 1 ? 's' : ''}` +
-        (wasResized ? ' — large images downscaled to ≤1024 px before upscaling' : ''),
+        (wasResized ? ` — large images downscaled to ≤${cap} px before upscaling` : ''),
     );
-  }, []);
+  }, [scale]);
 
   const onPickFiles = (e: React.ChangeEvent<HTMLInputElement>) => {
     if (e.target.files) loadFiles(e.target.files);
@@ -529,7 +530,7 @@ export default function UpscalePage() {
                   Drop images here
                 </p>
                 <p className="text-sm text-slate-500 dark:text-slate-400">
-                  Anything above 1024 px will be downscaled to that before upscaling, to fit in browser memory.
+                  Large images are auto-downscaled to fit in browser memory: ≤768 px for 2×, ≤384 px for 4×.
                 </p>
               </div>
               <input
