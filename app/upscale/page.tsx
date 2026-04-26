@@ -5,49 +5,84 @@ import JSZip from 'jszip';
 import { Button } from '@/components/ui/button';
 import { Card } from '@/components/ui/card';
 import {
+  ArrowRight,
   Download,
   FileArchive,
   GitCompareArrows,
   Plus,
   RotateCcw,
-  Scissors,
   Sparkles,
   Trash2,
   Upload,
   Wand2,
   X,
+  ZoomIn,
 } from 'lucide-react';
 import { toast } from 'sonner';
-import { formatBytes, makeThumbnail, triggerDownload } from '@/lib/image-utils';
+import {
+  fileToImageData,
+  formatBytes,
+  imageDataToBlob,
+  makeThumbnail,
+  triggerDownload,
+} from '@/lib/image-utils';
 
-type BgItem = {
+type Scale = 2 | 4;
+type Mode = 'photo' | 'compressed';
+
+const MODELS: Record<string, string> = {
+  '2-photo': 'Xenova/swin2SR-classical-sr-x2-64',
+  '4-photo': 'Xenova/swin2SR-realworld-sr-x4-64-bsrgan-psnr',
+  '4-compressed': 'Xenova/swin2SR-compressed-sr-x4-48',
+};
+
+const MAX_INPUT_DIM = 1024;
+const TRANSFORMERS_CDN = 'https://esm.sh/@xenova/transformers@2.17.2';
+
+type UpscaleItem = {
   id: string;
   name: string;
-  file: File;
+  imageData: ImageData;
   thumbnailUrl: string;
   originalSize: number;
+  originalWidth: number;
+  originalHeight: number;
+  inputWidth: number;
+  inputHeight: number;
   resultBlob: Blob | null;
   resultUrl: string | null;
   resultSize: number | null;
+  resultWidth: number | null;
+  resultHeight: number | null;
   processing: boolean;
-  progress: number;
   processed: boolean;
   error?: string;
 };
 
-export default function BackgroundPage() {
+type Pipeline = (input: string | Blob) => Promise<{
+  data: Uint8Array;
+  width: number;
+  height: number;
+  channels: number;
+}>;
+
+export default function UpscalePage() {
   const fileInputRef = useRef<HTMLInputElement>(null);
   const stageRef = useRef<HTMLDivElement>(null);
   const resultCanvasRef = useRef<HTMLCanvasElement>(null);
   const originalCanvasRef = useRef<HTMLCanvasElement>(null);
   const sliderDragRef = useRef(false);
+  const pipelineCache = useRef<Map<string, Pipeline>>(new Map());
 
-  const [items, setItems] = useState<BgItem[]>([]);
+  const [items, setItems] = useState<UpscaleItem[]>([]);
   const [isDragOver, setIsDragOver] = useState(false);
   const [batchRunning, setBatchRunning] = useState(false);
   const [zipping, setZipping] = useState(false);
-  const [modelReady, setModelReady] = useState(false);
+
+  const [scale, setScale] = useState<Scale>(2);
+  const [mode, setMode] = useState<Mode>('photo');
   const [modelLoadPct, setModelLoadPct] = useState<number | null>(null);
+  const [activeStatus, setActiveStatus] = useState<string | null>(null);
 
   const [compareId, setCompareId] = useState<string | null>(null);
   const [sliderPct, setSliderPct] = useState(50);
@@ -81,32 +116,35 @@ export default function BackgroundPage() {
     const rcanvas = resultCanvasRef.current;
     if (!ocanvas || !rcanvas) return;
 
-    const origUrl = URL.createObjectURL(compareItem.file);
     const oimg = new Image();
     oimg.onload = () => {
       ocanvas.width = oimg.naturalWidth;
       ocanvas.height = oimg.naturalHeight;
       ocanvas.getContext('2d')?.drawImage(oimg, 0, 0);
-      URL.revokeObjectURL(origUrl);
     };
-    oimg.onerror = () => URL.revokeObjectURL(origUrl);
-    oimg.src = origUrl;
+    oimg.src = (() => {
+      const c = document.createElement('canvas');
+      c.width = compareItem.imageData.width;
+      c.height = compareItem.imageData.height;
+      c.getContext('2d')?.putImageData(compareItem.imageData, 0, 0);
+      return c.toDataURL('image/png');
+    })();
 
     const resUrl = URL.createObjectURL(compareItem.resultBlob);
     const rimg = new Image();
     rimg.onload = () => {
       rcanvas.width = rimg.naturalWidth;
       rcanvas.height = rimg.naturalHeight;
-      const ctx = rcanvas.getContext('2d');
-      if (ctx) {
-        ctx.clearRect(0, 0, rcanvas.width, rcanvas.height);
-        ctx.drawImage(rimg, 0, 0);
-      }
+      rcanvas.getContext('2d')?.drawImage(rimg, 0, 0);
       URL.revokeObjectURL(resUrl);
     };
     rimg.onerror = () => URL.revokeObjectURL(resUrl);
     rimg.src = resUrl;
   }, [compareItem]);
+
+  const updateItem = useCallback((id: string, patch: Partial<UpscaleItem>) => {
+    setItems((prev) => prev.map((it) => (it.id === id ? { ...it, ...patch } : it)));
+  }, []);
 
   const updateSlider = (clientX: number) => {
     const s = stageRef.current;
@@ -139,70 +177,54 @@ export default function BackgroundPage() {
     setCompareId(id);
   };
 
-  const updateItem = useCallback((id: string, patch: Partial<BgItem>) => {
-    setItems((prev) => prev.map((it) => (it.id === id ? { ...it, ...patch } : it)));
-  }, []);
+  const getPipeline = useCallback(
+    async (modelId: string): Promise<Pipeline> => {
+      const cached = pipelineCache.current.get(modelId);
+      if (cached) return cached;
 
-  const processItem = useCallback(
-    async (item: BgItem) => {
-      updateItem(item.id, { processing: true, progress: 1, error: undefined });
+      // eslint-disable-next-line @typescript-eslint/ban-ts-comment
+      // @ts-ignore — runtime CDN import
+      const mod = await import(/* webpackIgnore: true */ TRANSFORMERS_CDN);
+      const { pipeline, env } = mod;
+      env.allowLocalModels = false;
+      env.useBrowserCache = true;
 
-      try {
-        const cdnUrl = 'https://esm.sh/@imgly/background-removal@1.7.0';
-        // eslint-disable-next-line @typescript-eslint/ban-ts-comment
-        // @ts-ignore — resolved at runtime by the browser
-        const mod = await import(/* webpackIgnore: true */ cdnUrl);
-        const removeBackground = mod.removeBackground as (
-          input: Blob | File | string,
-          config?: Record<string, unknown>,
-        ) => Promise<Blob>;
+      const fileTotals = new Map<string, { loaded: number; total: number }>();
+      let lastPct = 0;
 
-        const blob = await removeBackground(item.file, {
-          publicPath:
-            'https://staticimgly.com/@imgly/background-removal-data/1.7.0/dist/',
-          output: { format: 'image/png' },
-          progress: (key: string, current: number, total: number) => {
-            if (!total) return;
-            const pct = Math.round((current / total) * 100);
-            if (key.startsWith('fetch') || key.startsWith('download')) {
-              setModelLoadPct(pct);
-            } else {
-              updateItem(item.id, { progress: Math.max(1, pct) });
+      const pipe = (await pipeline('image-to-image', modelId, {
+        progress_callback: (data: {
+          status: string;
+          name?: string;
+          loaded?: number;
+          total?: number;
+        }) => {
+          if (data.status === 'initiate' && data.name) {
+            fileTotals.set(data.name, { loaded: 0, total: 0 });
+          } else if (data.status === 'progress' && data.name) {
+            fileTotals.set(data.name, {
+              loaded: data.loaded ?? 0,
+              total: data.total ?? 0,
+            });
+            const totals = Array.from(fileTotals.values());
+            const sumLoaded = totals.reduce((s, f) => s + f.loaded, 0);
+            const sumTotal = totals.reduce((s, f) => s + f.total, 0);
+            if (sumTotal > 0) {
+              const pct = Math.round((sumLoaded / sumTotal) * 100);
+              if (pct !== lastPct) {
+                lastPct = pct;
+                setModelLoadPct(pct);
+              }
             }
-          },
-        });
+          }
+        },
+      })) as Pipeline;
 
-        setModelLoadPct(null);
-        setModelReady(true);
-
-        const url = URL.createObjectURL(blob);
-        setItems((prev) =>
-          prev.map((it) => {
-            if (it.id !== item.id) return it;
-            if (it.resultUrl) URL.revokeObjectURL(it.resultUrl);
-            return {
-              ...it,
-              resultBlob: blob,
-              resultUrl: url,
-              resultSize: blob.size,
-              processing: false,
-              processed: true,
-              progress: 0,
-            };
-          }),
-        );
-      } catch (err) {
-        console.error(err);
-        setModelLoadPct(null);
-        updateItem(item.id, {
-          processing: false,
-          progress: 0,
-          error: err instanceof Error ? err.message : 'Failed',
-        });
-        throw err;
-      }
+      pipelineCache.current.set(modelId, pipe);
+      setModelLoadPct(null);
+      return pipe;
     },
-    [updateItem],
+    [],
   );
 
   const loadFiles = useCallback(async (files: FileList | File[]) => {
@@ -212,21 +234,27 @@ export default function BackgroundPage() {
       return;
     }
 
-    const newItems: BgItem[] = [];
+    const newItems: UpscaleItem[] = [];
     for (const file of imageFiles) {
       try {
-        const thumbData = await fileToImageDataForThumb(file);
+        const original = await fileToImageData(file);
+        const { input, w, h } = downscaleIfNeeded(original, MAX_INPUT_DIM);
         newItems.push({
           id: crypto.randomUUID(),
           name: file.name,
-          file,
-          thumbnailUrl: makeThumbnail(thumbData, 160),
+          imageData: input,
+          thumbnailUrl: makeThumbnail(input, 160),
           originalSize: file.size,
+          originalWidth: original.width,
+          originalHeight: original.height,
+          inputWidth: w,
+          inputHeight: h,
           resultBlob: null,
           resultUrl: null,
           resultSize: null,
+          resultWidth: null,
+          resultHeight: null,
           processing: false,
-          progress: 0,
           processed: false,
         });
       } catch (err) {
@@ -234,10 +262,16 @@ export default function BackgroundPage() {
         console.error(err);
       }
     }
-
     if (newItems.length === 0) return;
+
+    const wasResized = newItems.some(
+      (i) => i.inputWidth !== i.originalWidth || i.inputHeight !== i.originalHeight,
+    );
     setItems((prev) => [...prev, ...newItems]);
-    toast.success(`Added ${newItems.length} image${newItems.length > 1 ? 's' : ''}`);
+    toast.success(
+      `Added ${newItems.length} image${newItems.length > 1 ? 's' : ''}` +
+        (wasResized ? ' — large images downscaled to ≤1024 px before upscaling' : ''),
+    );
   }, []);
 
   const onPickFiles = (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -267,19 +301,84 @@ export default function BackgroundPage() {
     if (fileInputRef.current) fileInputRef.current.value = '';
   };
 
-  const runActive = async (item: BgItem) => {
+  const processItem = useCallback(
+    async (item: UpscaleItem) => {
+      const key = `${scale}-${mode}` as keyof typeof MODELS;
+      const modelId = MODELS[key] ?? MODELS['2-photo'];
+
+      updateItem(item.id, { processing: true, error: undefined });
+      setActiveStatus(`Loading ${modelId.split('/').pop()}…`);
+
+      try {
+        const pipe = await getPipeline(modelId);
+        setActiveStatus('Running inference…');
+
+        const inputBlob = await imageDataToBlob(item.imageData, 'png', 100, null);
+        if (!inputBlob) throw new Error('Could not encode input');
+        const inputUrl = URL.createObjectURL(inputBlob);
+
+        let raw: { data: Uint8Array; width: number; height: number };
+        try {
+          raw = await pipe(inputUrl);
+        } finally {
+          URL.revokeObjectURL(inputUrl);
+        }
+
+        const rgba = new Uint8ClampedArray(raw.width * raw.height * 4);
+        for (let i = 0, n = raw.width * raw.height; i < n; i++) {
+          rgba[i * 4] = raw.data[i * 3];
+          rgba[i * 4 + 1] = raw.data[i * 3 + 1];
+          rgba[i * 4 + 2] = raw.data[i * 3 + 2];
+          rgba[i * 4 + 3] = 255;
+        }
+        const resultData = new ImageData(rgba, raw.width, raw.height);
+        const resultBlob = await imageDataToBlob(resultData, 'png', 100, null);
+        if (!resultBlob) throw new Error('Could not encode result');
+
+        const resultUrl = URL.createObjectURL(resultBlob);
+        setItems((prev) =>
+          prev.map((it) => {
+            if (it.id !== item.id) return it;
+            if (it.resultUrl) URL.revokeObjectURL(it.resultUrl);
+            return {
+              ...it,
+              resultBlob,
+              resultUrl,
+              resultSize: resultBlob.size,
+              resultWidth: raw.width,
+              resultHeight: raw.height,
+              processing: false,
+              processed: true,
+            };
+          }),
+        );
+        setActiveStatus(null);
+      } catch (err) {
+        console.error(err);
+        setActiveStatus(null);
+        updateItem(item.id, {
+          processing: false,
+          error: err instanceof Error ? err.message : 'Failed',
+        });
+        throw err;
+      }
+    },
+    [scale, mode, getPipeline, updateItem],
+  );
+
+  const runActive = async (item: UpscaleItem) => {
     try {
       await processItem(item);
-      toast.success('Background removed');
+      toast.success('Upscaled');
     } catch {
-      toast.error('Something went wrong');
+      toast.error('Upscale failed');
     }
   };
 
   const runAll = async () => {
     const pending = items.filter((i) => !i.processed && !i.processing);
     if (pending.length === 0) {
-      toast.error('Nothing to process');
+      toast.error('Nothing to upscale');
       return;
     }
     setBatchRunning(true);
@@ -293,19 +392,19 @@ export default function BackgroundPage() {
       }
     }
     setBatchRunning(false);
-    toast.success(`Processed ${ok} of ${pending.length}`);
+    toast.success(`Upscaled ${ok} of ${pending.length}`);
   };
 
-  const downloadItem = (item: BgItem) => {
+  const downloadItem = (item: UpscaleItem) => {
     if (!item.resultBlob) return;
     const base = item.name.replace(/\.[^.]+$/, '');
-    triggerDownload(item.resultBlob, `${base}-nobg.png`);
+    triggerDownload(item.resultBlob, `${base}-${scale}x.png`);
   };
 
   const downloadAllZip = async () => {
     const ready = items.filter((i) => i.resultBlob);
     if (ready.length === 0) {
-      toast.error('Nothing processed yet');
+      toast.error('Nothing upscaled yet');
       return;
     }
     setZipping(true);
@@ -313,10 +412,10 @@ export default function BackgroundPage() {
       const zip = new JSZip();
       for (const item of ready) {
         const base = item.name.replace(/\.[^.]+$/, '');
-        zip.file(`${base}-nobg.png`, item.resultBlob!);
+        zip.file(`${base}-${scale}x.png`, item.resultBlob!);
       }
       const out = await zip.generateAsync({ type: 'blob' });
-      triggerDownload(out, 'no-background.zip');
+      triggerDownload(out, `upscaled-${scale}x.zip`);
       toast.success(`Zipped ${ready.length} image${ready.length > 1 ? 's' : ''}`);
     } catch (err) {
       toast.error('Zip failed');
@@ -335,20 +434,20 @@ export default function BackgroundPage() {
         <header className="mb-8 text-center">
           <div className="mb-3 inline-flex items-center gap-2 rounded-full border border-slate-200 bg-white px-4 py-1.5 text-xs font-medium text-slate-600 shadow-sm dark:border-slate-800 dark:bg-slate-900 dark:text-slate-400">
             <Sparkles className="h-3.5 w-3.5" />
-            On-device AI — nothing uploaded
+            On-device super-resolution — nothing uploaded
           </div>
           <h1 className="text-4xl font-bold tracking-tight text-slate-900 dark:text-slate-50 sm:text-5xl">
-            Remove background
+            Upscale &amp; enhance
           </h1>
           <p className="mx-auto mt-3 max-w-2xl text-slate-600 dark:text-slate-400">
-            Cut the subject out of any photo. The AI model (~40 MB) loads once into your browser on first use — after that it&apos;s offline.
+            Run a swin2SR super-resolution model in your browser. First use of each model downloads ~50 MB and is cached after.
           </p>
         </header>
 
-        {modelLoadPct != null && !modelReady && (
+        {modelLoadPct != null && (
           <Card className="mb-4 border-amber-200 bg-amber-50 dark:border-amber-900/50 dark:bg-amber-950/30">
             <div className="flex items-center gap-3 p-4">
-              <Sparkles className="h-4 w-4 shrink-0 text-amber-700 dark:text-amber-300" />
+              <ZoomIn className="h-4 w-4 shrink-0 text-amber-700 dark:text-amber-300" />
               <div className="flex-1">
                 <div className="text-sm font-medium text-amber-900 dark:text-amber-200">
                   Downloading model… {modelLoadPct}%
@@ -360,7 +459,7 @@ export default function BackgroundPage() {
                   />
                 </div>
                 <p className="mt-1 text-xs text-amber-800/80 dark:text-amber-300/80">
-                  One-time download, cached for next visits.
+                  One-time download per model. Cached for next visits.
                 </p>
               </div>
             </div>
@@ -368,6 +467,46 @@ export default function BackgroundPage() {
         )}
 
         <Card className="overflow-hidden">
+          <div className="grid gap-4 border-b border-slate-200 p-4 dark:border-slate-800 sm:grid-cols-2 sm:p-5">
+            <div className="flex flex-col gap-1.5 text-sm">
+              <span className="text-slate-600 dark:text-slate-400">Scale</span>
+              <div className="inline-flex rounded-md border border-slate-300 bg-white p-0.5 dark:border-slate-700 dark:bg-slate-900">
+                {([2, 4] as const).map((s) => (
+                  <button
+                    key={s}
+                    type="button"
+                    onClick={() => {
+                      setScale(s);
+                      if (s === 2) setMode('photo');
+                    }}
+                    disabled={batchRunning}
+                    className={`flex-1 rounded px-3 py-1.5 text-sm font-medium transition-colors ${
+                      scale === s
+                        ? 'bg-slate-900 text-white dark:bg-slate-100 dark:text-slate-900'
+                        : 'text-slate-600 hover:bg-slate-100 dark:text-slate-400 dark:hover:bg-slate-800'
+                    }`}
+                  >
+                    {s}×
+                  </button>
+                ))}
+              </div>
+            </div>
+            <div className="flex flex-col gap-1.5 text-sm">
+              <span className="text-slate-600 dark:text-slate-400">
+                Model {scale === 2 ? '(only Photo at 2×)' : ''}
+              </span>
+              <select
+                value={mode}
+                onChange={(e) => setMode(e.target.value as Mode)}
+                disabled={scale === 2 || batchRunning}
+                className="rounded border border-slate-300 bg-white px-2 py-1.5 text-sm disabled:opacity-50 dark:border-slate-700 dark:bg-slate-900"
+              >
+                <option value="photo">Photo — general real-world images</option>
+                <option value="compressed">JPEG cleanup — for compressed photos</option>
+              </select>
+            </div>
+          </div>
+
           {items.length === 0 ? (
             <label
               onDragOver={(e) => {
@@ -387,10 +526,10 @@ export default function BackgroundPage() {
               </div>
               <div className="text-center">
                 <p className="text-lg font-semibold text-slate-900 dark:text-slate-50">
-                  Drop photos here
+                  Drop images here
                 </p>
                 <p className="text-sm text-slate-500 dark:text-slate-400">
-                  Works best with clear subjects. Multiple files allowed.
+                  Anything above 1024 px will be downscaled to that before upscaling, to fit in browser memory.
                 </p>
               </div>
               <input
@@ -433,7 +572,10 @@ export default function BackgroundPage() {
                     onChange={onPickFiles}
                   />
                 </div>
-                <div className="flex flex-wrap gap-2">
+                <div className="flex flex-wrap items-center gap-2">
+                  {activeStatus && (
+                    <span className="text-xs text-slate-500">{activeStatus}</span>
+                  )}
                   <Button
                     size="lg"
                     onClick={runAll}
@@ -441,7 +583,7 @@ export default function BackgroundPage() {
                     className="min-w-[180px]"
                   >
                     <Wand2 className="mr-2 h-4 w-4" />
-                    {batchRunning ? 'Running…' : `Remove all (${pendingCount})`}
+                    {batchRunning ? 'Upscaling…' : `Upscale all (${pendingCount})`}
                   </Button>
                   <Button
                     size="lg"
@@ -458,52 +600,46 @@ export default function BackgroundPage() {
 
               <div className="divide-y divide-slate-200 dark:divide-slate-800">
                 {items.map((item) => (
-                  <div key={item.id} className="flex flex-col gap-3 p-3 sm:flex-row sm:items-center sm:p-4">
-                    <div className="flex shrink-0 items-center gap-3">
-                      {/* eslint-disable-next-line @next/next/no-img-element */}
-                      <img
-                        src={item.thumbnailUrl}
-                        alt=""
-                        className="h-20 w-20 rounded object-cover"
-                      />
-                      {item.resultUrl && (
-                        <>
-                          <Scissors className="h-4 w-4 text-slate-400" />
-                          {/* eslint-disable-next-line @next/next/no-img-element */}
-                          <img
-                            src={item.resultUrl}
-                            alt=""
-                            className="h-20 w-20 rounded bg-[linear-gradient(45deg,#e2e8f0_25%,transparent_25%),linear-gradient(-45deg,#e2e8f0_25%,transparent_25%),linear-gradient(45deg,transparent_75%,#e2e8f0_75%),linear-gradient(-45deg,transparent_75%,#e2e8f0_75%)] bg-[length:10px_10px] bg-[position:0_0,0_5px,5px_-5px,-5px_0] object-contain"
-                          />
-                        </>
-                      )}
-                    </div>
+                  <div
+                    key={item.id}
+                    className="flex flex-col gap-3 p-3 sm:flex-row sm:items-center sm:p-4"
+                  >
+                    {/* eslint-disable-next-line @next/next/no-img-element */}
+                    <img
+                      src={item.thumbnailUrl}
+                      alt=""
+                      className="h-20 w-20 shrink-0 rounded object-cover"
+                    />
                     <div className="min-w-0 flex-1">
                       <div className="truncate text-sm font-medium text-slate-900 dark:text-slate-100">
                         {item.name}
                       </div>
-                      <div className="mt-0.5 text-xs text-slate-500 tabular-nums">
-                        {formatBytes(item.originalSize)}
-                        {item.resultSize != null && (
+                      <div className="mt-0.5 flex flex-wrap items-center gap-2 text-xs text-slate-500 tabular-nums">
+                        <span>
+                          {item.inputWidth}×{item.inputHeight}
+                        </span>
+                        {item.resultWidth && item.resultHeight && (
                           <>
-                            <span className="mx-1.5">→</span>
-                            <span className="text-slate-700 dark:text-slate-300">
-                              {formatBytes(item.resultSize)} (PNG)
+                            <ArrowRight className="h-3 w-3 text-slate-400" />
+                            <span className="font-medium text-slate-900 dark:text-slate-100">
+                              {item.resultWidth}×{item.resultHeight}
                             </span>
+                            {item.resultSize != null && (
+                              <span className="text-slate-500">
+                                · {formatBytes(item.resultSize)}
+                              </span>
+                            )}
                           </>
+                        )}
+                        {item.inputWidth !== item.originalWidth && (
+                          <span className="rounded bg-slate-100 px-1.5 py-0.5 text-[11px] text-slate-600 dark:bg-slate-800 dark:text-slate-400">
+                            from {item.originalWidth}×{item.originalHeight}
+                          </span>
                         )}
                       </div>
                       {item.processing && (
-                        <div className="mt-2">
-                          <div className="text-xs text-slate-500">
-                            Processing… {item.progress}%
-                          </div>
-                          <div className="mt-1 h-1.5 w-full overflow-hidden rounded-full bg-slate-200 dark:bg-slate-800">
-                            <div
-                              className="h-full bg-slate-900 transition-[width] duration-150 dark:bg-slate-100"
-                              style={{ width: `${item.progress}%` }}
-                            />
-                          </div>
+                        <div className="mt-2 text-xs text-slate-500">
+                          Running {scale}× model…
                         </div>
                       )}
                       {item.error && (
@@ -520,7 +656,7 @@ export default function BackgroundPage() {
                           disabled={item.processing || batchRunning}
                         >
                           <Wand2 className="mr-1.5 h-4 w-4" />
-                          {item.processing ? 'Processing…' : 'Remove bg'}
+                          {item.processing ? 'Working…' : 'Upscale'}
                         </Button>
                       ) : (
                         <>
@@ -560,7 +696,7 @@ export default function BackgroundPage() {
         </Card>
 
         <p className="mt-6 text-center text-xs text-slate-500 dark:text-slate-500">
-          Runs offline after the first model download. Output is a transparent PNG.
+          Real-ESRGAN-style models run on CPU via WebAssembly. Expect 10–60 s per image. Cached after first download.
         </p>
       </div>
 
@@ -574,8 +710,12 @@ export default function BackgroundPage() {
           }}
         >
           <div className="flex w-full max-w-5xl items-center justify-between gap-4 text-white">
-            <div className="min-w-0 flex-1 truncate text-sm font-medium">
-              {compareItem.name}
+            <div className="min-w-0 flex-1 truncate text-sm">
+              <span className="font-medium">{compareItem.name}</span>
+              <span className="ml-3 text-white/70 tabular-nums">
+                {compareItem.inputWidth}×{compareItem.inputHeight} → {compareItem.resultWidth}×
+                {compareItem.resultHeight}
+              </span>
             </div>
             <button
               type="button"
@@ -588,7 +728,7 @@ export default function BackgroundPage() {
           </div>
           <div
             ref={stageRef}
-            className="relative inline-block max-h-[80vh] max-w-full select-none overflow-hidden rounded"
+            className="relative inline-block max-h-[80vh] max-w-full select-none overflow-hidden rounded bg-black"
             style={{ cursor: 'ew-resize', touchAction: 'none' }}
             onPointerDown={onSliderDown}
             onPointerMove={onSliderMove}
@@ -597,7 +737,7 @@ export default function BackgroundPage() {
           >
             <canvas
               ref={resultCanvasRef}
-              className="canvas-stage block h-auto max-h-[80vh] w-auto max-w-full"
+              className="block h-auto max-h-[80vh] w-auto max-w-full"
             />
             <canvas
               ref={originalCanvasRef}
@@ -622,10 +762,10 @@ export default function BackgroundPage() {
               </div>
             </div>
             <span className="pointer-events-none absolute left-2 top-2 rounded bg-black/70 px-2 py-0.5 text-xs font-medium text-white">
-              Original
+              Original (upscaled in browser)
             </span>
             <span className="pointer-events-none absolute right-2 top-2 rounded bg-black/70 px-2 py-0.5 text-xs font-medium text-white">
-              Cut-out
+              {scale}× SR
             </span>
           </div>
           <p className="text-xs text-white/60">
@@ -637,27 +777,26 @@ export default function BackgroundPage() {
   );
 }
 
-function fileToImageDataForThumb(file: File): Promise<ImageData> {
-  return new Promise((resolve, reject) => {
-    const reader = new FileReader();
-    reader.onerror = () => reject(new Error('read failed'));
-    reader.onload = () => {
-      const img = new Image();
-      img.onload = () => {
-        const canvas = document.createElement('canvas');
-        canvas.width = img.naturalWidth;
-        canvas.height = img.naturalHeight;
-        const ctx = canvas.getContext('2d');
-        if (!ctx) {
-          reject(new Error('canvas context failed'));
-          return;
-        }
-        ctx.drawImage(img, 0, 0);
-        resolve(ctx.getImageData(0, 0, canvas.width, canvas.height));
-      };
-      img.onerror = () => reject(new Error('decode failed'));
-      img.src = reader.result as string;
-    };
-    reader.readAsDataURL(file);
-  });
+function downscaleIfNeeded(
+  data: ImageData,
+  maxDim: number,
+): { input: ImageData; w: number; h: number } {
+  const longest = Math.max(data.width, data.height);
+  if (longest <= maxDim) return { input: data, w: data.width, h: data.height };
+  const scale = maxDim / longest;
+  const w = Math.max(1, Math.round(data.width * scale));
+  const h = Math.max(1, Math.round(data.height * scale));
+  const src = document.createElement('canvas');
+  src.width = data.width;
+  src.height = data.height;
+  src.getContext('2d')?.putImageData(data, 0, 0);
+  const dst = document.createElement('canvas');
+  dst.width = w;
+  dst.height = h;
+  const dctx = dst.getContext('2d');
+  if (!dctx) return { input: data, w: data.width, h: data.height };
+  dctx.imageSmoothingEnabled = true;
+  dctx.imageSmoothingQuality = 'high';
+  dctx.drawImage(src, 0, 0, w, h);
+  return { input: dctx.getImageData(0, 0, w, h), w, h };
 }

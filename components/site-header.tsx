@@ -2,11 +2,12 @@
 
 import Link from 'next/link';
 import { usePathname } from 'next/navigation';
-import { Scissors, Shield, Shrink, Sparkles, Wand2 } from 'lucide-react';
+import { Scissors, Shield, Shrink, Sparkles, Wand2, ZoomIn } from 'lucide-react';
 import { cn } from '@/lib/utils';
 
 const nav = [
   { href: '/', label: 'Watermark', icon: Wand2 },
+  { href: '/upscale', label: 'Upscale', icon: ZoomIn },
   { href: '/compress', label: 'Compress', icon: Shrink },
   { href: '/background', label: 'Background', icon: Scissors },
   { href: '/metadata', label: 'Metadata', icon: Shield },
